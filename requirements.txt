@@ -1,0 +1,15 @@
+pandas
+numpy
+scikit-learn
+matplotlib
+seaborn
+joblib
+xgboost
+lightgbm
+imbalanced-learn
+shap
+pre-commit
+flake8
+black
+isort
+pydocstyle
