@@ -13,3 +13,4 @@ flake8
 black
 isort
 pydocstyle
+plotly
