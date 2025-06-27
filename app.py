@@ -29,7 +29,7 @@ with redirect_stdout(_stdout_buffer), redirect_stderr(_stderr_buffer):
     try:
         from sklearn.experimental import enable_iterative_imputer
         import src.config as config
-        from src.utils import setup_logging, load_dataframe, load_object
+        from src.utils import setup_logging, load_dataframe, load_object # Ensure load_dataframe and load_object are imported
         from src.business_understanding import business_understanding_phase
         from src.data_understanding import data_understanding_phase
         from src.data_preparation import data_preparation_phase
@@ -211,23 +211,26 @@ def load_all_artifacts_and_results():
     """
     artifacts = {}
     try:
-        # Load core prediction artifacts
+        # Load core prediction artifacts using load_object from src.utils
         artifacts['label_encoder'] = load_object(config.MODELS_DIR, 'label_encoder.pkl')
         artifacts['numerical_imputer'] = load_object(config.MODELS_DIR, 'numerical_imputer.pkl')
 
-        # Load available trained models
+        # Load available trained models using load_object from src.utils
         available_models = {name: load_object(config.MODELS_DIR, f'{name.lower()}_best_pipeline.pkl')
                             for name in config.CLASSIFIERS_TO_TRAIN.keys()}
-        # Attempt to load the ensemble model
+        # Attempt to load the ensemble model using load_object from src.utils
         ensemble_model = load_object(config.MODELS_DIR, 'ensemble_voting_classifier.pkl')
         if ensemble_model:
             available_models['Ensemble'] = ensemble_model
 
         artifacts['available_models'] = {k: v for k, v in available_models.items() if v is not None}
 
-        # Load test data for advanced evaluation visualizations
-        artifacts['X_test'] = pd.read_csv(os.path.join(config.PROCESSED_DATA_DIR, 'X_test.csv'))
-        artifacts['y_test'] = pd.read_csv(os.path.join(config.PROCESSED_DATA_DIR, 'y_test.csv')).iloc[:, 0]
+        # Load test data for advanced evaluation visualizations using load_dataframe from src.utils
+        artifacts['X_test'] = load_dataframe(config.PROCESSED_DATA_DIR, 'X_test.csv')
+        # Check if y_test dataframe was loaded successfully before slicing
+        y_test_df = load_dataframe(config.PROCESSED_DATA_DIR, 'y_test.csv')
+        artifacts['y_test'] = y_test_df.iloc[:, 0] if y_test_df is not None else None
+
 
         # Load cached evaluation metrics if they exist
         metrics_path = os.path.join(config.REPORTS_DIR, 'evaluation_metrics.csv')
@@ -511,10 +514,11 @@ with tab_prediction:
                         processed_df = preprocess_for_prediction(df_for_pred.copy(), artifacts['numerical_imputer'])
 
                         # Ensure columns match training data for consistent prediction
-                        X_train_cols_path = os.path.join(config.PROCESSED_DATA_DIR, 'X_train.csv')
-                        if os.path.exists(X_train_cols_path):
-                            # Read only the header to get column names
-                            X_train_cols = pd.read_csv(X_train_cols_path, nrows=0).columns
+                        # This part of the code expects X_train.csv to be loaded locally or downloaded via utils.load_dataframe
+                        # Ensure X_train.csv is also accessible via your server for robust deployment
+                        X_train_cols_df = load_dataframe(config.PROCESSED_DATA_DIR, 'X_train.csv')
+                        if X_train_cols_df is not None:
+                            X_train_cols = X_train_cols_df.columns
                             # Reindex to match training columns, filling missing with 0 and dropping extra
                             processed_df = processed_df.reindex(columns=X_train_cols, fill_value=0)
                             # Ensure numerical columns are of float type as expected by models
@@ -522,7 +526,7 @@ with tab_prediction:
                                 if pd.api.types.is_numeric_dtype(processed_df[col]):
                                     processed_df[col] = processed_df[col].astype(float)
                         else:
-                            st.warning("X_train.csv not found. Prediction might fail due to column mismatch. Please run the full pipeline.")
+                            st.warning("X_train.csv not found or could not be downloaded. Prediction might fail due to column mismatch. Please run the full pipeline or ensure server is configured correctly.")
                             # Attempt to proceed but warn the user
 
                         try:
@@ -564,7 +568,7 @@ with tab_prediction:
         )
 
         # Apply confidence filter
-        filtered_results_df = results_df_full[results_df_full['Confidence'] >= min_confidence_threshold]
+        filtered_results_df = results_df_full[results_df_full['Confidence'] >= min_confidence_threshold].copy() # Added .copy() to avoid SettingWithCopyWarning
         attacks_df = filtered_results_df[filtered_results_df['Predicted_Attack_Type'] != 'BENIGN'].copy()
 
         # Define color map dynamically based on all classes from label encoder
@@ -901,9 +905,10 @@ with tab_prediction:
 
                     if 'Confidence' in df_page.columns and not df_page.empty:
                         if pd.api.types.is_numeric_dtype(df_page['Confidence']) and not df_page['Confidence'].empty:
-                            max_conf_idx = df_page['Confidence'].idxmax()
-                            current_style = style_df.loc[max_conf_idx].iloc[0]  # Get existing style string
-                            style_df.loc[max_conf_idx] = f'{current_style} border: 3px solid #0d6efd;'  # Add border
+                            # Use iloc to get the index that corresponds to max confidence in the current slice
+                            max_conf_idx_in_slice = df_page['Confidence'].idxmax()
+                            current_style = style_df.loc[max_conf_idx_in_slice].iloc[0]  # Get existing style string
+                            style_df.loc[max_conf_idx_in_slice] = f'{current_style} border: 3px solid #0d6efd;'  # Add border
                     return style_df
 
 
@@ -990,9 +995,12 @@ with tab_ranking:
                     if 'Overall Score' in comparison_df.columns:
                         columns_to_highlight.append('Overall Score')
 
-                    # Display the comparison table with highlighting
+                    # Create a dictionary of format strings for only the numerical columns
+                    format_dict = {col: '{:.4f}' for col in columns_to_highlight}
+
+                    # Display the comparison table with highlighting and specific formatting
                     st.dataframe(comparison_df.style.highlight_max(axis=0, subset=columns_to_highlight,
-                                                                   color='#3E4C59').format('{:.4f}'),
+                                                                   color='#3E4C59').format(format_dict),
                                  use_container_width=True)
 
                     # Interactive bar chart for selected metrics comparison
@@ -1062,14 +1070,20 @@ with tab_ranking:
                 best_model = artifacts['available_models'].get(best_model_name_to_use)
 
                 if best_model:
-                    y_true = artifacts['y_test']
+                    y_true_encoded = artifacts['y_test'] # Keep original encoded for internal model use
                     X_test_eval = artifacts['X_test']
-                    labels = artifacts['label_encoder'].classes_
+                    label_encoder = artifacts['label_encoder'] # Get the label encoder
+                    labels_str = label_encoder.classes_ # These are the string labels for display and cm
 
                     # Predict on the test set
                     try:
-                        y_pred = best_model.predict(X_test_eval)
+                        y_pred_encoded = best_model.predict(X_test_eval)
                         y_prob = best_model.predict_proba(X_test_eval)
+
+                        # Convert true and predicted labels to strings for confusion matrix and error analysis
+                        y_true_str = label_encoder.inverse_transform(y_true_encoded)
+                        y_pred_str = label_encoder.inverse_transform(y_pred_encoded)
+
                     except Exception as pred_eval_err:
                         st.error(f"Error predicting on test data for {best_model_name_to_use}: {pred_eval_err}")
                         best_model = None # Disable further visualizations for this model if prediction fails
@@ -1078,9 +1092,10 @@ with tab_ranking:
                 if best_model: # Re-check if model prediction was successful
                     with eval_tabs[1]: # Confusion Matrix Tab
                         st.markdown(f"#### Confusion Matrix for {best_model_name_to_use}")
-                        cm = confusion_matrix(y_true, y_pred, labels=labels)
-                        fig_cm = px.imshow(cm, text_auto=True, labels=dict(x="Predicted", y="Actual"), x=labels,
-                                           y=labels, title=f"Confusion Matrix for {best_model_name_to_use}",
+                        # Use string labels for confusion matrix directly
+                        cm = confusion_matrix(y_true_str, y_pred_str, labels=labels_str)
+                        fig_cm = px.imshow(cm, text_auto=True, labels=dict(x="Predicted", y="Actual"), x=labels_str,
+                                           y=labels_str, title=f"Confusion Matrix for {best_model_name_to_use}",
                                            color_continuous_scale=px.colors.sequential.Viridis, template="plotly_dark")
                         st.plotly_chart(fig_cm, use_container_width=True)
 
@@ -1105,24 +1120,30 @@ with tab_ranking:
                         fig_roc.update_layout(template="plotly_dark", xaxis_title="False Positive Rate",
                                               yaxis_title="True Positive Rate",
                                               title_text=f"ROC Curves for {best_model_name_to_use}")
-                        for i, label in enumerate(labels):
-                            y_true_binary = (y_true == label).astype(int) # Binarize true labels for one-vs-rest ROC
+                        for i, label_str_value in enumerate(labels_str): # Iterate through string label names
+                            # Binarize true labels for one-vs-rest ROC, comparing encoded true labels with integer index
+                            y_true_binary = (y_true_encoded == i).astype(int)
                             # Ensure the class exists in y_true before calculating ROC
                             if np.sum(y_true_binary) > 0 and y_prob.shape[1] > i:
                                 fpr, tpr, _ = roc_curve(y_true_binary, y_prob[:, i])
                                 fig_roc.add_trace(
-                                    go.Scatter(x=fpr, y=tpr, mode='lines', name=f'{label} (AUC = {auc(fpr, tpr):.2f})'))
+                                    go.Scatter(x=fpr, y=tpr, mode='lines', name=f'{label_str_value} (AUC = {auc(fpr, tpr):.2f})'))
                             else:
-                                st.warning(f"Skipping ROC for class '{label}' due to no positive samples or mismatched prediction probabilities.")
+                                st.warning(f"Skipping ROC for class '{label_str_value}' due to no positive samples or mismatched prediction probabilities.")
                         fig_roc.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode='lines', line=dict(dash='dash'),
                                                      name='Random (AUC = 0.50)'))
                         st.plotly_chart(fig_roc, use_container_width=True)
 
                     with eval_tabs[4]: # Error Analysis Tab
                         st.markdown("#### Error Analysis: Common Misclassifications")
-                        errors = y_pred != y_true
+                        # Use encoded values for comparison to identify errors
+                        errors = y_pred_encoded != y_true_encoded
                         if errors.any(): # Check if there are any misclassifications
-                            error_df = pd.DataFrame({'Actual': y_true[errors], 'Predicted': y_pred[errors]})
+                            # Create error_df with string labels for better readability in treemap
+                            error_df = pd.DataFrame({
+                                'Actual': label_encoder.inverse_transform(y_true_encoded[errors]),
+                                'Predicted': label_encoder.inverse_transform(y_pred_encoded[errors])
+                            })
                             # Group by actual and predicted to find common misclassification pairs
                             error_counts = error_df.groupby(['Actual', 'Predicted']).size().reset_index(
                                 name='Count').sort_values('Count', ascending=False)
